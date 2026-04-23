@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>광원측정실 일정표 (평일 전용)</title>
+
+<style>
+body { 
+  font-family: Arial; 
+  padding:20px; 
+  background:#f7f9fc; 
+}
+
+input, select, button { 
+  margin:5px; 
+  padding:6px; 
+  border:1px solid #ddd;
+  border-radius:4px;
+}
+
+table { 
+  border-collapse: collapse; 
+  width:100%; 
+  background:white; 
+  font-size:13px;
+}
+
+th, td { 
+  border:1px solid #e5e7eb; 
+  text-align:center; 
+  height:80px; 
+}
+
+th { 
+  background:#eef4ff; 
+  color:#333; 
+  font-weight:600;
+}
+
+.sticky-col { 
+  background:#f8fafc; 
+  font-weight:bold; 
+}
+
+th[colspan] {
+  background:#dce9ff !important;
+}
+
+.today {
+  background:#fff3cd !important;
+  border:2px solid #ffc107;
+}
+
+.sch-box {
+  font-size:11px;
+  padding:5px;
+  margin:2px;
+  border-radius:6px;
+  cursor:grab;
+  color:#333;
+  border-left:4px solid rgba(0,0,0,0.2);
+}
+
+.sch-box:hover {
+  transform: scale(1.03);
+}
+</style>
+</head>
+
+<body>
+
+<h2>🔬 광원측정실 일정표 (평일)</h2>
+
+시험명 <input id="name">
+의뢰자 <input id="requester">
+샘플수 <input type="number" id="count" value="1" style="width:60px">
+
+장비 
+<select id="device">
+<option>소형적분구</option>
+<option>대형적분구</option>
+<option>SIG</option>
+<option>RIGO</option>
+<option>LID</option>
+</select>
+
+시작일 <input type="date" id="start">
+기간 <input type="number" id="duration" value="1">
+
+<button onclick="addSchedule()">등록</button>
+<button onclick="downloadExcel()">엑셀 다운로드</button>
+
+월 선택
+<select id="month" onchange="renderCalendar()">
+<script>
+let currentMonth = new Date().getMonth() + 1;
+for(let i=1;i<=12;i++){
+ document.write(`<option value="${i}" ${i===currentMonth ? 'selected' : ''}>${i}월</option>`)
+}
+</script>
+</select>
+
+<table id="calendar"></table>
+
+<div id="modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5)">
+ <div style="background:white;padding:20px;margin:100px auto;width:320px">
+  <input type="hidden" id="editId">
+
+  시험명 <input id="editName"><br>
+  의뢰자 <input id="editRequester"><br>
+  샘플수 <input id="editCount"><br>
+  시작일 <input type="date" id="editStart"><br>
+  기간 <input type="number" id="editDuration"><br>
+
+  <button onclick="copyMail()">메일 복사</button><br><br>
+
+  <button onclick="saveEdit()">저장</button>
+  <button onclick="deleteSchedule()">삭제</button>
+  <button onclick="closeModal()">닫기</button>
+ </div>
+</div>
+
+<script>
+
+let schedules = [];
+let devices = ["소형적분구","대형적분구","SIG","RIGO","LID"];
+let draggedId = null;
+
+function getRandomColor(){
+ const h = Math.floor(Math.random()*360);
+ return `hsl(${h},70%,85%)`;
+}
+
+function save(){
+ localStorage.setItem("schedule", JSON.stringify(schedules));
+}
+
+function load(){
+ let data = localStorage.getItem("schedule");
+ if(data){
+  schedules = JSON.parse(data);
+  schedules.forEach(s=>{
+    s.start = new Date(s.start);
+    s.end = new Date(s.end);
+  });
+ }
+}
+
+// 평일 기준으로 종료일 계산
+function calcEnd(start, dur){
+ let d = new Date(start);
+ let count = 0;
+ while(count < dur){
+  if(d.getDay() !== 0 && d.getDay() !== 6) count++;
+  if(count < dur) d.setDate(d.getDate()+1);
+ }
+ return d;
+}
+
+function addSchedule(){
+ let name = document.getElementById("name").value;
+ let requester = document.getElementById("requester").value;
+ let count = document.getElementById("count").value;
+ let device = document.getElementById("device").value;
+ let start = new Date(document.getElementById("start").value);
+ let duration = parseInt(document.getElementById("duration").value);
+
+ if(!name || isNaN(start)) return alert("정보를 입력하세요");
+
+ if(start.getDay()===0 || start.getDay()===6){
+  return alert("주말은 시작일로 선택할 수 없습니다.");
+ }
+
+ let end = calcEnd(start, duration);
+
+ schedules.push({
+  id: Date.now(),
+  name,
+  requester,
+  count,
+  device,
+  start,
+  end,
+  duration,
+  color: getRandomColor()
+ });
+
+ save();
+ renderCalendar();
+}
+
+function dragStart(e, id){ draggedId = id; }
+
+function dropSchedule(dateStr){
+ if(!draggedId) return;
+
+ let newDate = new Date(dateStr);
+ // 주말 드롭 방지 (평일만 렌더링되므로 논리적 방어)
+ if(newDate.getDay()===0 || newDate.getDay()===6){
+  return alert("주말은 선택할 수 없습니다.");
+ }
+
+ let s = schedules.find(x=>x.id===draggedId);
+ s.start = newDate;
+ s.end = calcEnd(newDate, s.duration);
+
+ save();
+ renderCalendar();
+ draggedId=null;
+}
+
+function openModal(id){
+ let s = schedules.find(x=>x.id===id);
+
+ document.getElementById("editId").value = s.id;
+ document.getElementById("editName").value = s.name;
+ document.getElementById("editRequester").value = s.requester;
+ document.getElementById("editCount").value = s.count;
+ document.getElementById("editStart").value = s.start.toISOString().split('T')[0];
+ document.getElementById("editDuration").value = s.duration;
+
+ document.getElementById("modal").style.display="block";
+}
+
+function closeModal(){
+ document.getElementById("modal").style.display="none";
+}
+
+function saveEdit(){
+ let id = parseInt(document.getElementById("editId").value);
+ let s = schedules.find(x=>x.id===id);
+
+ let start = new Date(document.getElementById("editStart").value);
+ if(start.getDay()===0 || start.getDay()===6){
+  return alert("주말은 선택할 수 없습니다.");
+ }
+
+ s.name = document.getElementById("editName").value;
+ s.requester = document.getElementById("editRequester").value;
+ s.count = document.getElementById("editCount").value;
+ s.start = start;
+ s.duration = parseInt(document.getElementById("editDuration").value);
+ s.end = calcEnd(start, s.duration);
+
+ save();
+ renderCalendar();
+ closeModal();
+}
+
+function deleteSchedule(){
+ let id = parseInt(document.getElementById("editId").value);
+ schedules = schedules.filter(s=>s.id!==id);
+ save();
+ renderCalendar();
+ closeModal();
+}
+
+function copyMail(){
+ let id = document.getElementById("editId").value;
+ let s = schedules.find(x=>x.id==id);
+
+ let text = `${s.name} ${s.device} 측정, ${s.start.getMonth()+1}/${s.start.getDate()} ~ ${s.end.getMonth()+1}/${s.end.getDate()}, ${s.duration}일`;
+ navigator.clipboard.writeText(text);
+ alert("클립보드에 복사되었습니다.");
+}
+
+function downloadExcel(){
+ let csv=[["시험명","의뢰자","샘플수","장비","시작일","종료일","기간"]];
+ schedules.forEach(s=>{
+  csv.push([s.name,s.requester,s.count,s.device,s.start.toLocaleDateString(),s.end.toLocaleDateString(),s.duration]);
+ });
+
+ let blob=new Blob(["\uFEFF"+csv.map(e=>e.join(",")).join("\n")]);
+ let a=document.createElement("a");
+ a.href=URL.createObjectURL(blob);
+ a.download="광원측정실_일정표.csv";
+ a.click();
+}
+
+function renderCalendar(){
+ let year=new Date().getFullYear();
+ let month=parseInt(document.getElementById("month").value);
+ let table=document.getElementById("calendar");
+ table.innerHTML="";
+
+ let today=new Date();
+ let date=new Date(year,month-1,1);
+ let days=[];
+
+ // 평일(월~금)만 수집
+ while(date.getMonth()===month-1){
+  let dayOfWeek = date.getDay();
+  if(dayOfWeek !== 0 && dayOfWeek !== 6) {
+    days.push(new Date(date));
+  }
+  date.setDate(date.getDate()+1);
+ }
+
+ // 평일 기준 5일 단위로 주차 구분
+ let weeks=[];
+ for(let i=0;i<days.length;i+=5){
+  weeks.push(days.slice(i,i+5));
+ }
+
+ let weekNames=["일","월","화","수","목","금","토"];
+
+ // 헤더: 주차
+ let html="<tr><th class='sticky-col'>장비</th>";
+ weeks.forEach((w,i)=> html+=`<th colspan="${w.length}">${month}월 ${i+1}주차</th>`);
+ html+="</tr>";
+
+ // 헤더: 요일
+ html+="<tr><th></th>";
+ weeks.forEach(w=>{
+  w.forEach(d=>{
+   let c= d.toDateString()===today.toDateString() ? "today" : "";
+   html+=`<th class="${c}">${weekNames[d.getDay()]}</th>`;
+  });
+ });
+ html+="</tr>";
+
+ // 헤더: 날짜
+ html+="<tr><th>날짜</th>";
+ weeks.forEach(w=>{
+  w.forEach(d=>{
+   let c= d.toDateString()===today.toDateString() ? "today" : "";
+   html+=`<th class="${c}">${d.getMonth()+1}/${d.getDate()}</th>`;
+  });
+ });
+ html+="</tr>";
+
+ // 장비별 데이터 렌더링
+ devices.forEach(dev=>{
+  html+=`<tr><td class="sticky-col">${dev}</td>`;
+  weeks.forEach(w=>{
+   w.forEach(d=>{
+    let list=schedules.filter(s=>s.device===dev && d>=s.start && d<=s.end);
+    let content=list.map(s=>`
+     <div class="sch-box"
+      draggable="true"
+      onclick="openModal(${s.id})"
+      ondragstart="dragStart(event,${s.id})"
+      style="background:${s.color}">
+      <b>${s.name}</b><br>${s.requester}(${s.count})
+     </div>
+    `).join("");
+
+    html+=`<td ondragover="event.preventDefault()" ondrop="dropSchedule('${d.toISOString()}')">${content}</td>`;
+   });
+  });
+  html+="</tr>";
+ });
+
+ table.innerHTML=html;
+}
+
+// 초기 로드
+document.getElementById("start").valueAsDate=new Date();
+document.getElementById("month").value=new Date().getMonth()+1;
+
+load();
+renderCalendar();
+
+</script>
+
+</body>
+</html>
