@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <title>광원측정실 일정표 (평일 전용)</title>
 
+<!-- ✅ Firebase SDK (v9 compat) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
 <style>
 body { 
   font-family: Arial; 
@@ -64,6 +68,13 @@ th[colspan] {
 .sch-box:hover {
   transform: scale(1.03);
 }
+
+#status {
+  font-size:12px;
+  color:#888;
+  margin:4px 8px;
+  display:inline-block;
+}
 </style>
 </head>
 
@@ -89,6 +100,7 @@ th[colspan] {
 
 <button onclick="addSchedule()">등록</button>
 <button onclick="downloadExcel()">엑셀 다운로드</button>
+<span id="status">🔄 Firestore 연결 중...</span>
 
 월 선택
 <select id="month" onchange="renderCalendar()">
@@ -103,7 +115,7 @@ for(let i=1;i<=12;i++){
 <table id="calendar"></table>
 
 <div id="modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5)">
- <div style="background:white;padding:20px;margin:100px auto;width:320px">
+ <div style="background:white;padding:20px;margin:100px auto;width:320px;border-radius:8px;">
   <input type="hidden" id="editId">
 
   시험명 <input id="editName"><br>
@@ -122,246 +134,332 @@ for(let i=1;i<=12;i++){
 
 <script>
 
+// ============================================================
+// ✅ Firebase 설정 - 아래 값을 본인의 Firebase 프로젝트 설정으로 교체하세요
+// Firebase Console → 프로젝트 설정 → 내 앱 → SDK 설정 및 구성
+// ============================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyAjPSLh6fJjOOocNLor2DpdFEnoR9Osu6A",
+  authDomain: "lightsource-mesurement-lab.firebaseapp.com",
+  projectId: "lightsource-mesurement-lab",
+  storageBucket: "lightsource-mesurement-lab.firebasestorage.app",
+  messagingSenderId: "1029496124142",
+  appId: "1:1029496124142:web:555319b932e12d4329f9ff",
+  measurementId: "G-NXRTK28WK2"
+};
+
+// Firebase 초기화
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const schedulesRef = db.collection("schedules");
+
+// ============================================================
+
 let schedules = [];
 let devices = ["소형적분구","대형적분구","SIG","RIGO","LID"];
 let draggedId = null;
 
+function setStatus(msg) {
+  document.getElementById("status").textContent = msg;
+}
+
 function getRandomColor(){
- const h = Math.floor(Math.random()*360);
- return `hsl(${h},70%,85%)`;
-}
-
-function save(){
- localStorage.setItem("schedule", JSON.stringify(schedules));
-}
-
-function load(){
- let data = localStorage.getItem("schedule");
- if(data){
-  schedules = JSON.parse(data);
-  schedules.forEach(s=>{
-    s.start = new Date(s.start);
-    s.end = new Date(s.end);
-  });
- }
+  const h = Math.floor(Math.random()*360);
+  return `hsl(${h},70%,85%)`;
 }
 
 // 평일 기준으로 종료일 계산
 function calcEnd(start, dur){
- let d = new Date(start);
- let count = 0;
- while(count < dur){
-  if(d.getDay() !== 0 && d.getDay() !== 6) count++;
-  if(count < dur) d.setDate(d.getDate()+1);
- }
- return d;
+  let d = new Date(start);
+  let count = 0;
+  while(count < dur){
+    if(d.getDay() !== 0 && d.getDay() !== 6) count++;
+    if(count < dur) d.setDate(d.getDate()+1);
+  }
+  return d;
 }
 
-function addSchedule(){
- let name = document.getElementById("name").value;
- let requester = document.getElementById("requester").value;
- let count = document.getElementById("count").value;
- let device = document.getElementById("device").value;
- let start = new Date(document.getElementById("start").value);
- let duration = parseInt(document.getElementById("duration").value);
-
- if(!name || isNaN(start)) return alert("정보를 입력하세요");
-
- if(start.getDay()===0 || start.getDay()===6){
-  return alert("주말은 시작일로 선택할 수 없습니다.");
- }
-
- let end = calcEnd(start, duration);
-
- schedules.push({
-  id: Date.now(),
-  name,
-  requester,
-  count,
-  device,
-  start,
-  end,
-  duration,
-  color: getRandomColor()
- });
-
- save();
- renderCalendar();
+// Firestore Timestamp → Date 변환
+function firestoreDocToSchedule(doc){
+  const d = doc.data();
+  return {
+    id: doc.id,                                    // Firestore 문서 ID (string)
+    name: d.name,
+    requester: d.requester,
+    count: d.count,
+    device: d.device,
+    start: d.start.toDate(),                       // Timestamp → Date
+    end: d.end.toDate(),
+    duration: d.duration,
+    color: d.color
+  };
 }
 
+// ============================================================
+// Firestore 실시간 구독 (onSnapshot)
+// 다른 사용자가 추가/수정/삭제해도 자동으로 캘린더 갱신됩니다
+// ============================================================
+function subscribeSchedules(){
+  schedulesRef.onSnapshot(snapshot => {
+    schedules = snapshot.docs.map(doc => firestoreDocToSchedule(doc));
+    renderCalendar();
+    setStatus("✅ Firestore 연결됨");
+  }, err => {
+    console.error(err);
+    setStatus("❌ Firestore 오류: " + err.message);
+  });
+}
+
+// ============================================================
+// 등록
+// ============================================================
+async function addSchedule(){
+  let name = document.getElementById("name").value;
+  let requester = document.getElementById("requester").value;
+  let count = document.getElementById("count").value;
+  let device = document.getElementById("device").value;
+  let start = new Date(document.getElementById("start").value);
+  let duration = parseInt(document.getElementById("duration").value);
+
+  if(!name || isNaN(start.getTime())) return alert("정보를 입력하세요");
+
+  if(start.getDay()===0 || start.getDay()===6){
+    return alert("주말은 시작일로 선택할 수 없습니다.");
+  }
+
+  let end = calcEnd(start, duration);
+
+  try {
+    setStatus("⏳ 저장 중...");
+    await schedulesRef.add({
+      name,
+      requester,
+      count,
+      device,
+      start: firebase.firestore.Timestamp.fromDate(start),
+      end: firebase.firestore.Timestamp.fromDate(end),
+      duration,
+      color: getRandomColor()
+    });
+    // onSnapshot이 자동으로 renderCalendar() 호출
+  } catch(e) {
+    alert("저장 실패: " + e.message);
+    setStatus("❌ 저장 실패");
+  }
+}
+
+// ============================================================
+// 드래그 & 드롭
+// ============================================================
 function dragStart(e, id){ draggedId = id; }
 
-function dropSchedule(dateStr){
- if(!draggedId) return;
+async function dropSchedule(dateStr){
+  if(!draggedId) return;
 
- let newDate = new Date(dateStr);
- // 주말 드롭 방지 (평일만 렌더링되므로 논리적 방어)
- if(newDate.getDay()===0 || newDate.getDay()===6){
-  return alert("주말은 선택할 수 없습니다.");
- }
+  let newDate = new Date(dateStr);
+  if(newDate.getDay()===0 || newDate.getDay()===6){
+    return alert("주말은 선택할 수 없습니다.");
+  }
 
- let s = schedules.find(x=>x.id===draggedId);
- s.start = newDate;
- s.end = calcEnd(newDate, s.duration);
+  let s = schedules.find(x=>x.id===draggedId);
+  if(!s) return;
 
- save();
- renderCalendar();
- draggedId=null;
+  let newEnd = calcEnd(newDate, s.duration);
+
+  try {
+    setStatus("⏳ 업데이트 중...");
+    await schedulesRef.doc(draggedId).update({
+      start: firebase.firestore.Timestamp.fromDate(newDate),
+      end: firebase.firestore.Timestamp.fromDate(newEnd)
+    });
+  } catch(e) {
+    alert("업데이트 실패: " + e.message);
+  }
+  draggedId = null;
 }
 
+// ============================================================
+// 모달 편집
+// ============================================================
 function openModal(id){
- let s = schedules.find(x=>x.id===id);
+  let s = schedules.find(x=>x.id===id);
+  if(!s) return;
 
- document.getElementById("editId").value = s.id;
- document.getElementById("editName").value = s.name;
- document.getElementById("editRequester").value = s.requester;
- document.getElementById("editCount").value = s.count;
- document.getElementById("editStart").value = s.start.toISOString().split('T')[0];
- document.getElementById("editDuration").value = s.duration;
+  document.getElementById("editId").value = s.id;
+  document.getElementById("editName").value = s.name;
+  document.getElementById("editRequester").value = s.requester;
+  document.getElementById("editCount").value = s.count;
+  document.getElementById("editStart").value = s.start.toISOString().split('T')[0];
+  document.getElementById("editDuration").value = s.duration;
 
- document.getElementById("modal").style.display="block";
+  document.getElementById("modal").style.display="block";
 }
 
 function closeModal(){
- document.getElementById("modal").style.display="none";
+  document.getElementById("modal").style.display="none";
 }
 
-function saveEdit(){
- let id = parseInt(document.getElementById("editId").value);
- let s = schedules.find(x=>x.id===id);
+async function saveEdit(){
+  let id = document.getElementById("editId").value;
+  let start = new Date(document.getElementById("editStart").value);
 
- let start = new Date(document.getElementById("editStart").value);
- if(start.getDay()===0 || start.getDay()===6){
-  return alert("주말은 선택할 수 없습니다.");
- }
-
- s.name = document.getElementById("editName").value;
- s.requester = document.getElementById("editRequester").value;
- s.count = document.getElementById("editCount").value;
- s.start = start;
- s.duration = parseInt(document.getElementById("editDuration").value);
- s.end = calcEnd(start, s.duration);
-
- save();
- renderCalendar();
- closeModal();
-}
-
-function deleteSchedule(){
- let id = parseInt(document.getElementById("editId").value);
- schedules = schedules.filter(s=>s.id!==id);
- save();
- renderCalendar();
- closeModal();
-}
-
-function copyMail(){
- let id = document.getElementById("editId").value;
- let s = schedules.find(x=>x.id==id);
-
- let text = `${s.name} ${s.device} 측정, ${s.start.getMonth()+1}/${s.start.getDate()} ~ ${s.end.getMonth()+1}/${s.end.getDate()}, ${s.duration}일`;
- navigator.clipboard.writeText(text);
- alert("클립보드에 복사되었습니다.");
-}
-
-function downloadExcel(){
- let csv=[["시험명","의뢰자","샘플수","장비","시작일","종료일","기간"]];
- schedules.forEach(s=>{
-  csv.push([s.name,s.requester,s.count,s.device,s.start.toLocaleDateString(),s.end.toLocaleDateString(),s.duration]);
- });
-
- let blob=new Blob(["\uFEFF"+csv.map(e=>e.join(",")).join("\n")]);
- let a=document.createElement("a");
- a.href=URL.createObjectURL(blob);
- a.download="광원측정실_일정표.csv";
- a.click();
-}
-
-function renderCalendar(){
- let year=new Date().getFullYear();
- let month=parseInt(document.getElementById("month").value);
- let table=document.getElementById("calendar");
- table.innerHTML="";
-
- let today=new Date();
- let date=new Date(year,month-1,1);
- let days=[];
-
- // 평일(월~금)만 수집
- while(date.getMonth()===month-1){
-  let dayOfWeek = date.getDay();
-  if(dayOfWeek !== 0 && dayOfWeek !== 6) {
-    days.push(new Date(date));
+  if(start.getDay()===0 || start.getDay()===6){
+    return alert("주말은 선택할 수 없습니다.");
   }
-  date.setDate(date.getDate()+1);
- }
 
- // 평일 기준 5일 단위로 주차 구분
- let weeks=[];
- for(let i=0;i<days.length;i+=5){
-  weeks.push(days.slice(i,i+5));
- }
+  let duration = parseInt(document.getElementById("editDuration").value);
+  let end = calcEnd(start, duration);
 
- let weekNames=["일","월","화","수","목","금","토"];
+  try {
+    setStatus("⏳ 저장 중...");
+    await schedulesRef.doc(id).update({
+      name: document.getElementById("editName").value,
+      requester: document.getElementById("editRequester").value,
+      count: document.getElementById("editCount").value,
+      start: firebase.firestore.Timestamp.fromDate(start),
+      end: firebase.firestore.Timestamp.fromDate(end),
+      duration
+    });
+    closeModal();
+  } catch(e) {
+    alert("수정 실패: " + e.message);
+    setStatus("❌ 수정 실패");
+  }
+}
 
- // 헤더: 주차
- let html="<tr><th class='sticky-col'>장비</th>";
- weeks.forEach((w,i)=> html+=`<th colspan="${w.length}">${month}월 ${i+1}주차</th>`);
- html+="</tr>";
+async function deleteSchedule(){
+  let id = document.getElementById("editId").value;
+  if(!confirm("정말 삭제하시겠습니까?")) return;
 
- // 헤더: 요일
- html+="<tr><th></th>";
- weeks.forEach(w=>{
-  w.forEach(d=>{
-   let c= d.toDateString()===today.toDateString() ? "today" : "";
-   html+=`<th class="${c}">${weekNames[d.getDay()]}</th>`;
+  try {
+    setStatus("⏳ 삭제 중...");
+    await schedulesRef.doc(id).delete();
+    closeModal();
+  } catch(e) {
+    alert("삭제 실패: " + e.message);
+    setStatus("❌ 삭제 실패");
+  }
+}
+
+// ============================================================
+// 메일 복사
+// ============================================================
+function copyMail(){
+  let id = document.getElementById("editId").value;
+  let s = schedules.find(x=>x.id==id);
+  if(!s) return;
+
+  let text = `${s.name} ${s.device} 측정, ${s.start.getMonth()+1}/${s.start.getDate()} ~ ${s.end.getMonth()+1}/${s.end.getDate()}, ${s.duration}일`;
+  navigator.clipboard.writeText(text);
+  alert("클립보드에 복사되었습니다.");
+}
+
+// ============================================================
+// 엑셀(CSV) 다운로드
+// ============================================================
+function downloadExcel(){
+  let csv=[["시험명","의뢰자","샘플수","장비","시작일","종료일","기간"]];
+  schedules.forEach(s=>{
+    csv.push([s.name,s.requester,s.count,s.device,s.start.toLocaleDateString(),s.end.toLocaleDateString(),s.duration]);
   });
- });
- html+="</tr>";
 
- // 헤더: 날짜
- html+="<tr><th>날짜</th>";
- weeks.forEach(w=>{
-  w.forEach(d=>{
-   let c= d.toDateString()===today.toDateString() ? "today" : "";
-   html+=`<th class="${c}">${d.getMonth()+1}/${d.getDate()}</th>`;
-  });
- });
- html+="</tr>";
+  let blob=new Blob(["\uFEFF"+csv.map(e=>e.join(",")).join("\n")]);
+  let a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="광원측정실_일정표.csv";
+  a.click();
+}
 
- // 장비별 데이터 렌더링
- devices.forEach(dev=>{
-  html+=`<tr><td class="sticky-col">${dev}</td>`;
+// ============================================================
+// 캘린더 렌더링 (기존 로직 유지)
+// ============================================================
+function renderCalendar(){
+  let year=new Date().getFullYear();
+  let month=parseInt(document.getElementById("month").value);
+  let table=document.getElementById("calendar");
+  table.innerHTML="";
+
+  let today=new Date();
+  let date=new Date(year,month-1,1);
+  let days=[];
+
+  while(date.getMonth()===month-1){
+    let dayOfWeek = date.getDay();
+    if(dayOfWeek !== 0 && dayOfWeek !== 6) {
+      days.push(new Date(date));
+    }
+    date.setDate(date.getDate()+1);
+  }
+
+  let weeks=[];
+  for(let i=0;i<days.length;i+=5){
+    weeks.push(days.slice(i,i+5));
+  }
+
+  let weekNames=["일","월","화","수","목","금","토"];
+
+  let html="<tr><th class='sticky-col'>장비</th>";
+  weeks.forEach((w,i)=> html+=`<th colspan="${w.length}">${month}월 ${i+1}주차</th>`);
+  html+="</tr>";
+
+  html+="<tr><th></th>";
   weeks.forEach(w=>{
-   w.forEach(d=>{
-    let list=schedules.filter(s=>s.device===dev && d>=s.start && d<=s.end);
-    let content=list.map(s=>`
-     <div class="sch-box"
-      draggable="true"
-      onclick="openModal(${s.id})"
-      ondragstart="dragStart(event,${s.id})"
-      style="background:${s.color}">
-      <b>${s.name}</b><br>${s.requester}(${s.count})
-     </div>
-    `).join("");
-
-    html+=`<td ondragover="event.preventDefault()" ondrop="dropSchedule('${d.toISOString()}')">${content}</td>`;
-   });
+    w.forEach(d=>{
+      let c= d.toDateString()===today.toDateString() ? "today" : "";
+      html+=`<th class="${c}">${weekNames[d.getDay()]}</th>`;
+    });
   });
   html+="</tr>";
- });
 
- table.innerHTML=html;
+  html+="<tr><th>날짜</th>";
+  weeks.forEach(w=>{
+    w.forEach(d=>{
+      let c= d.toDateString()===today.toDateString() ? "today" : "";
+      html+=`<th class="${c}">${d.getMonth()+1}/${d.getDate()}</th>`;
+    });
+  });
+  html+="</tr>";
+
+  devices.forEach(dev=>{
+    html+=`<tr><td class="sticky-col">${dev}</td>`;
+    weeks.forEach(w=>{
+      w.forEach(d=>{
+        // 날짜 비교 시 시간 제거 후 비교
+        let dStart = new Date(d); dStart.setHours(0,0,0,0);
+        let list=schedules.filter(s=>{
+          let sStart = new Date(s.start); sStart.setHours(0,0,0,0);
+          let sEnd = new Date(s.end); sEnd.setHours(0,0,0,0);
+          return s.device===dev && dStart>=sStart && dStart<=sEnd;
+        });
+
+        let content=list.map(s=>`
+          <div class="sch-box"
+           draggable="true"
+           onclick="openModal('${s.id}')"
+           ondragstart="dragStart(event,'${s.id}')"
+           style="background:${s.color}">
+           <b>${s.name}</b><br>${s.requester}(${s.count})
+          </div>
+        `).join("");
+
+        html+=`<td ondragover="event.preventDefault()" ondrop="dropSchedule('${d.toISOString()}')">${content}</td>`;
+      });
+    });
+    html+="</tr>";
+  });
+
+  table.innerHTML=html;
 }
 
-// 초기 로드
-document.getElementById("start").valueAsDate=new Date();
-document.getElementById("month").value=new Date().getMonth()+1;
+// ============================================================
+// 초기화
+// ============================================================
+document.getElementById("start").valueAsDate = new Date();
+document.getElementById("month").value = new Date().getMonth() + 1;
 
-load();
-renderCalendar();
+// Firestore 실시간 구독 시작
+subscribeSchedules();
 
 </script>
-
 </body>
 </html>
